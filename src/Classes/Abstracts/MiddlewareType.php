@@ -1,0 +1,35 @@
+<?php declare(strict_types=1);
+
+namespace PHP_SF\System\Classes\Abstracts;
+
+use PHP_SF\System\Classes\Exception\RouteMiddlewareException;
+use PHP_SF\System\Classes\MiddlewareChecks\MiddlewareAll;
+use PHP_SF\System\Core\RedirectResponse;
+use Symfony\Component\HttpFoundation\JsonResponse;
+
+abstract class MiddlewareType
+{
+    public const DEFAULT = MiddlewareAll::class;
+
+
+    /**
+     * @param array<array-key, mixed> $middlewares
+     */
+    public function __construct(
+        protected readonly string|array $middlewares,
+    ) {}
+
+
+    /**
+     * @throws RouteMiddlewareException If any of validation fails it is recommended to throw an {@link RouteMiddlewareException}
+     */
+    abstract public function validate(): self;
+
+    /**
+     * Return `true` if the middleware allow the route to be executed, or a {@link RedirectResponse} or {@link JsonResponse}
+     * which will be returned by the {@link Middleware::execute()} method.
+     *
+     * @return bool|RedirectResponse|JsonResponse Result of the {@link Middleware::execute()} method
+     */
+    abstract public function execute(): bool|RedirectResponse|JsonResponse;
+}

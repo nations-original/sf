@@ -1,0 +1,99 @@
+<?php declare(strict_types=1);
+
+namespace PHP_SF\System\Classes\Abstracts;
+
+use InvalidArgumentException;
+use PHP_SF\System\Core\Response;
+use PHP_SF\System\Core\TemplateEngineRegistry;
+use PHP_SF\System\Core\TemplatesCache;
+use PHP_SF\Templates\Layout\footer;
+use PHP_SF\Templates\Layout\HeaderComponents\head;
+
+abstract class AbstractView
+{
+    /**
+     * @param array<string, mixed> $data
+     */
+    public function __construct(
+        protected readonly array $data = [],
+        protected readonly bool $viewClassTagEnabled = true,
+    ) {
+        Response::$activeTemplates[] = static::class;
+    }
+
+
+    /**
+     * @noinspection MagicMethodsValidityInspection
+     */
+    final public function __get(string $name): mixed
+    {
+        if (array_key_exists($name, $this->data)) {
+            return $this->data[$name];
+        }
+
+        throw new InvalidArgumentException("Undefined Property `$name` in view: " . static::class);
+    }
+
+    /**
+     * @noinspection MagicMethodsValidityInspection
+     */
+    public function __isset(string $name): bool
+    {
+        return array_key_exists($name, $this->data);
+    }
+
+
+    abstract public function show(): void;
+
+    final public function isViewClassTagEnabled(): bool
+    {
+        return $this->viewClassTagEnabled;
+    }
+
+    /**
+     * Includes another view or template file. Besides class-based views, template
+     * file names are dispatched to a registered template engine by extension,
+     * e.g. `partials/menu.html.twig` or `partials/menu.blade.php`.
+     *
+     * @param array<string, mixed> $data
+     */
+    final protected function import(string $view, array $data = [], bool $htmlClassTagEnabled = true): void
+    {
+        if (null !== $engine = TemplateEngineRegistry::resolve($view)) {
+            if ($htmlClassTagEnabled) {
+                echo sprintf('<div class="%s">', TemplateEngineRegistry::templateCssClass($view));
+            }
+
+            echo $engine->render($view, [...$this->data, ...$data]);
+
+            if ($htmlClassTagEnabled) {
+                echo '</div>';
+            }
+
+            return;
+        }
+
+        if (TEMPLATES_CACHE_ENABLED) {
+            $view = TemplatesCache::getInstance()->getCachedTemplateClass($view) ?: $view;
+        }
+
+        $class = new $view([...$this->data, ...$data], $htmlClassTagEnabled);
+
+        if ($class instanceof self) {
+            if ($class instanceof head || $class instanceof footer) {
+                $class->show();
+            } else {
+                $array = explode('\\', $view);
+                if ($class->isViewClassTagEnabled()) {
+                    echo sprintf('<div class="%s">', array_pop($array));
+                }
+
+                $class->show();
+
+                if ($class->isViewClassTagEnabled()) {
+                    echo '</div>';
+                }
+            }
+        }
+    }
+}
