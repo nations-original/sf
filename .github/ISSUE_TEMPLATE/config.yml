@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://wiki.nations-original.com/en/framework
+    about: Full framework documentation
+  - name: Security vulnerability
+    url: https://github.com/nations-original/sf/blob/master/SECURITY.md
+    about: Please report security issues by email, not as a public issue
+  - name: Template project issues
+    url: https://github.com/nations-original/sf-template/issues
+    about: Issues specific to the template project (not the framework core)
