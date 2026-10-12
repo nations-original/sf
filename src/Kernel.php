@@ -50,7 +50,7 @@ final class Kernel implements HttpKernelInterface
 
         $this->addTranslationFiles(__DIR__ . '/../lang');
 
-        $this->addTemplatesDirectory('vendor/nations-original/php-simple-framework/templates', 'PHP_SF\Templates');
+        $this->addTemplatesDirectory('vendor/nations-original/sf/templates', 'PHP_SF\Templates');
 
         PhpSfEventDispatcher::addSubscriberDirectory(__DIR__ . '/../app/EventSubscriber');
 

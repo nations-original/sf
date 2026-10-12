@@ -46,7 +46,7 @@ require_once $autoload;
 
 // ---------------------------------------------------------------------------
 // Force-load the FIXTURE-TESTED framework source from Platform/src, not the
-// Packagist-installed copy at vendor/nations-original/php-simple-framework/.
+// Packagist-installed copy at vendor/nations-original/sf/.
 // setPsr4() replaces the existing prefix mapping outright, so Platform/src
 // wins over the Packagist copy at vendor/ for every PHP_SF\System\* class.
 // ---------------------------------------------------------------------------
