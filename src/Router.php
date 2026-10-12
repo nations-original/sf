@@ -56,12 +56,14 @@ class Router
 
     /**
      * Suffix versioning the route cache keys. Bump whenever the serialized route
-     * schema gains or changes a field, so entries written by an older version cannot
-     * shadow the new field. In 4.0 the `/api/` URL-prefix fallback was removed, so the
-     * `api` flag is now authoritative for every route; the schema bump prevents stale
-     * entries (which may carry `api: null`) from being interpreted ambiguously.
+     * schema gains or changes a field — entries written by older versions cannot be
+     * safely reinterpreted.
+     *
+     * v5: cache-hit path now normalises `middleware` back to plain arrays via
+     * {@see self::normalizeCachedMiddleware()}, so stale entries that would decode
+     * nested middleware as `stdClass` must be invalidated.
      */
-    private const string ROUTE_CACHE_SCHEMA = ':v4';
+    private const string ROUTE_CACHE_SCHEMA = ':v5';
 
     /**
      * Entity property a route parameter falls back to when the URL placeholder names a
@@ -509,6 +511,11 @@ class Router
 
         if (ca()->get(sprintf('parsed_url:%s:%s' . self::ROUTE_CACHE_SCHEMA, $httpMethod, $urlHash))) {
             static::$currentRoute = j_decode(ca()->get(sprintf('parsed_url:%s:route:%s' . self::ROUTE_CACHE_SCHEMA, $httpMethod, $urlHash)));
+            // j_decode() without assoc decodes JSON objects as stdClass — a nested
+            // middleware tree keyed by class names (MiddlewareAll / MiddlewareAny /
+            // MiddlewareCustom) would land here as stdClass and break PhpSfContext's
+            // `array $middleware` ctor. {@see self::normalizeCachedMiddleware()}
+            static::$currentRoute->middleware = self::normalizeCachedMiddleware(static::$currentRoute->middleware ?? null);
             self::$urlParams = j_decode(ca()->get(sprintf('parsed_url:%s:route_params:%s' . self::ROUTE_CACHE_SCHEMA, $httpMethod, $urlHash)), true);
 
             return true;
@@ -620,6 +627,29 @@ class Router
         }
 
         return $currentUrl;
+    }
+
+    /**
+     * Recursively casts a decoded middleware tree back to plain arrays.
+     *
+     * `j_encode` writes `[MiddlewareAll::class => [...]]` as a JSON object, so a
+     * cache hit reads it back as `stdClass` — breaking PhpSfContext's
+     * `array $middleware` contract. Walks the tree, turning every `stdClass` into
+     * an array; leaves scalars and null untouched.
+     */
+    protected static function normalizeCachedMiddleware(mixed $middleware): mixed
+    {
+        if ($middleware instanceof \stdClass) {
+            $middleware = (array) $middleware;
+        }
+
+        if (is_array($middleware)) {
+            foreach ($middleware as $key => $value) {
+                $middleware[$key] = self::normalizeCachedMiddleware($value);
+            }
+        }
+
+        return $middleware;
     }
 
     protected static function setRequest(): void
