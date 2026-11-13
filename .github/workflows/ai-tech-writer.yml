@@ -1,0 +1,31 @@
+# Owner-approval-gated AI tech-writer for a PUBLIC repo on the GitHub Free plan.
+#
+# pull_request_target so the workflow file comes from the BASE branch (master) —
+# a fork PR cannot remove the gate. The owner-approval environment requires the
+# owner's approval before the self-hosted job runs. The gate mirrors the reusable
+# tech-writer job's skip conditions (forks, bots, drafts) so the owner is not
+# prompted for runs that would skip; fork PRs never reach the runner.
+name: AI Tech Writer
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  owner-approval:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !endsWith(github.event.pull_request.user.login, '[bot]') &&
+      !endsWith(github.actor, '[bot]') &&
+      (github.event.action == 'closed' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    environment: owner-approval
+    steps:
+      - run: echo "Owner approved this run."
+
+  tech-writer:
+    needs: owner-approval
+    uses: nations-original/ai-tech-writer/.github/workflows/tech-writer.yml@main

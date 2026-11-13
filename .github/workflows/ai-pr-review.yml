@@ -1,0 +1,42 @@
+# Owner-approval-gated AI PR review for a PUBLIC repo on the GitHub Free plan.
+#
+# Why pull_request_target (not pull_request): the workflow file is read from the
+# BASE branch (master), so a fork PR cannot edit the approval gate out of it.
+# The owner-approval environment has required reviewers (the repo owner), so
+# every run pauses until the owner approves before any job reaches the
+# self-hosted runner. The reviewer never checks out PR code: it fetches the diff
+# via the API and runs scripts pinned to the toolkit commit, so a fork PR has no
+# path to execute code on the runner.
+name: AI PR Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate: holds the run until the owner approves. Mirrors the reusable review
+  # job's skip conditions so the owner is never prompted for a run that would
+  # skip anyway (drafts, bot PRs other than ai-tech-writer[bot]).
+  owner-approval:
+    if: >-
+      (github.event.pull_request.user.type != 'Bot' ||
+       github.event.pull_request.user.login == 'ai-tech-writer[bot]') &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    environment: owner-approval
+    steps:
+      - run: echo "Owner approved this run."
+
+  review:
+    needs: owner-approval
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+      actions: read
+    uses: nations-original/ai-pr-review-workflow/.github/workflows/review.yml@main
+    secrets: inherit
