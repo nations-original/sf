@@ -2,9 +2,16 @@
 #
 # pull_request_target so the workflow file comes from the BASE branch (master) —
 # a fork PR cannot remove the gate. The owner-approval environment requires the
-# owner's approval before the self-hosted job runs. The gate mirrors the reusable
+# owner's approval before the self-hosted job runs. The gate mirrors the
 # tech-writer job's skip conditions (forks, bots, drafts) so the owner is not
 # prompted for runs that would skip; fork PRs never reach the runner.
+#
+# Why the tech-writer job is INLINED rather than `uses:` — a public repository
+# may only call reusable workflows in PUBLIC repositories (GitHub visibility
+# rule); ai-tech-writer is private. The job body mirrors
+# nations-original/ai-tech-writer/.github/workflows/tech-writer.yml and MUST be
+# kept in sync with it. ~/bin/atw-bootstrap (on the runner host) mints the App
+# token and pins the private toolkit; only TOOLKIT_SHA differs (empty -> main).
 name: AI Tech Writer
 
 on:
@@ -28,4 +35,29 @@ jobs:
 
   tech-writer:
     needs: owner-approval
-    uses: nations-original/ai-tech-writer/.github/workflows/tech-writer.yml@main
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !endsWith(github.event.pull_request.user.login, '[bot]') &&
+      !endsWith(github.actor, '[bot]') &&
+      (github.event.action == 'closed' || github.event.pull_request.draft == false)
+    runs-on: [self-hosted, ai-tech-writer]
+    timeout-minutes: 90
+    concurrency:
+      group: ai-tech-writer-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Run tech writer
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          # Inlined caller has no job_workflow_sha for the toolkit; empty makes
+          # atw-bootstrap follow the toolkit's main branch.
+          TOOLKIT_SHA: ""
+        run: "$HOME/bin/atw-bootstrap"
