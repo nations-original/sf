@@ -5,21 +5,35 @@
 # The owner-approval environment has required reviewers (the repo owner), so
 # every run pauses until the owner approves before any job reaches the
 # self-hosted runner. The reviewer never checks out PR code: it fetches the diff
-# via the API and runs scripts pinned to the toolkit commit, so a fork PR has no
+# via the API and runs scripts from the private toolkit, so a fork PR has no
 # path to execute code on the runner.
+#
+# Why the review job is INLINED rather than `uses:` — a public repository may
+# only call reusable workflows that live in PUBLIC repositories (GitHub
+# visibility rule); ai-pr-review-workflow is private. The job body below mirrors
+# nations-original/ai-pr-review-workflow/.github/workflows/review.yml and MUST be
+# kept in sync with it. The private scripts are checked out at runtime with the
+# App token; only `inputs.*` (hardcoded here) and the toolkit ref differ.
 name: AI PR Review
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
 
 jobs:
-  # Gate: holds the run until the owner approves. Mirrors the reusable review
-  # job's skip conditions so the owner is never prompted for a run that would
-  # skip anyway (drafts, bot PRs other than ai-tech-writer[bot]).
+  # Gate: holds the run until the owner approves. Mirrors the review job's skip
+  # conditions so the owner is never prompted for a run that would skip anyway.
   owner-approval:
     if: >-
       (github.event.pull_request.user.type != 'Bot' ||
@@ -31,12 +45,165 @@ jobs:
       - run: echo "Owner approved this run."
 
   review:
+    name: MiniMax Review
     needs: owner-approval
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-      statuses: write
-      actions: read
-    uses: nations-original/ai-pr-review-workflow/.github/workflows/review.yml@main
-    secrets: inherit
+    if: >-
+      (github.event.pull_request.user.type != 'Bot' ||
+       github.event.pull_request.user.login == 'ai-tech-writer[bot]') &&
+      !github.event.pull_request.draft
+    runs-on: [self-hosted, pr-reviewer]
+    timeout-minutes: 10
+    continue-on-error: true
+
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      MODEL: MiniMax-M3
+      # Run-scoped scratch dir — the self-hosted runner is shared across concurrent jobs.
+      AIREVIEW_DIR: /tmp/aireview-${{ github.run_id }}-${{ github.run_attempt }}
+      # Inlined caller: workflow_call inputs are hardcoded (defaults from review.yml).
+      AI_REVIEW_EXTRA_EXCLUDES: ""
+      AI_REVIEW_GUIDELINE_FILES: ""
+      AI_REVIEW_GUIDELINES_REF: "base"
+
+    steps:
+      # Credentials come from the runner HOST, not GitHub secrets: the pr-reviewer
+      # user holds ~/.config/ai-pr-reviewer/{app-id,app.pem} and ~/.config/minimax/env.
+      # ~/bin/aipr-app-token (installed by hand, not in any repo) mints a 1-hour
+      # installation token limited to the caller repo + the toolkit repo.
+      - name: Mint App token and load local secrets
+        id: app
+        env:
+          CALLER_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          token="$("$HOME/bin/aipr-app-token" "${CALLER_REPO#*/}" ai-pr-review-workflow)"
+          [ -n "$token" ] || { echo "::error::no App token minted"; exit 1; }
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
+          # Same file format the `minimax` wrapper sources (export MINIMAX_API_KEY=...);
+          # sourcing handles quoting/whitespace instead of hand-parsing it.
+          key="$(set +u; . "$HOME/.config/minimax/env" >/dev/null 2>&1; printf '%s' "${MINIMAX_API_KEY:-}")"
+          [ -n "$key" ] || { echo "::error::MINIMAX_API_KEY missing from ~/.config/minimax/env"; exit 1; }
+          echo "::add-mask::$key"
+          echo "MINIMAX_API_KEY=$key" >> "$GITHUB_ENV"
+
+      # Checkout the private review scripts with the App token (Contents: read).
+      # The caller's own source is never checked out — step1 fetches the diff via
+      # `gh pr diff --repo`, so a fork PR cannot alter the scripts on this runner.
+      # Inlined caller has no job_workflow_sha for the toolkit; track its main.
+      - name: Checkout review scripts
+        uses: actions/checkout@v4
+        with:
+          repository: nations-original/ai-pr-review-workflow
+          ref: main
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Fetch filtered diff
+        id: diff
+        run: bash scripts/ai_pr_review/step1_fetch_diff.sh
+
+      - name: Load disposition comment
+        id: tracker
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true'
+        run: python3 scripts/ai_pr_review/step1_5_load_disposition.py
+
+      - name: Extract diff anchors
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse != 'true'
+        run: bash scripts/ai_pr_review/step2_extract_diff_anchors.sh
+
+      - name: Fetch previous bot review
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true'
+        run: python3 scripts/ai_pr_review/step3_fetch_prev_review.py
+
+      - name: Fetch repo guidelines
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse != 'true'
+        run: python3 scripts/ai_pr_review/step3_5_fetch_repo_guidelines.py
+
+      - name: Build API payload
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse != 'true'
+        env:
+          FILE_COUNT: ${{ steps.diff.outputs.file_count }}
+        run: python3 scripts/ai_pr_review/step4_build_payload.py
+
+      - name: Call MiniMax API
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true'
+        id: api
+        run: bash scripts/ai_pr_review/step5_call_api.sh
+
+      - name: Sparse run - apply replies + set merge gate
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse == 'true'
+        env:
+          HEAD_SHA:                  ${{ steps.tracker.outputs.head_sha }}
+          DISPOSITION_COMMENT_ID:    ${{ steps.tracker.outputs.disposition_comment_id }}
+          DISPOSITION_PARSE_FAILED:  ${{ steps.tracker.outputs.disposition_parse_failed }}
+        run: python3 scripts/ai_pr_review/step5_6_sparse_replies.py
+
+      - name: Parse and split findings
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse != 'true'
+        env:
+          ITERATION: ${{ steps.tracker.outputs.iteration }}
+          HEAD_SHA:  ${{ steps.tracker.outputs.head_sha }}
+        run: python3 scripts/ai_pr_review/step6_parse_findings.py
+
+      - name: Check run is live
+        id: live
+        if: steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse != 'true'
+        run: python3 scripts/ai_pr_review/lib/check_run_live.py
+
+      - name: Post review
+        if: >-
+          steps.diff.outputs.skip != 'true' &&
+          steps.diff.outputs.noop != 'true' &&
+          steps.live.outputs.skip != 'true' &&
+          steps.api.outputs.sparse != 'true'
+        env:
+          INPUT_TOKENS:  ${{ steps.api.outputs.input_tokens }}
+          OUTPUT_TOKENS: ${{ steps.api.outputs.output_tokens }}
+          CACHE_READ:    ${{ steps.api.outputs.cache_read_input_tokens }}
+        run: bash scripts/ai_pr_review/step7_post_review.sh
+
+      - name: Persist disposition record
+        id: persist
+        if: >-
+          steps.diff.outputs.skip != 'true' &&
+          steps.diff.outputs.noop != 'true' &&
+          steps.live.outputs.skip != 'true' &&
+          steps.api.outputs.sparse != 'true'
+        env:
+          HEAD_SHA:                ${{ steps.tracker.outputs.head_sha }}
+          ITERATION:               ${{ steps.tracker.outputs.iteration }}
+          LAST_REVIEWED_SHA:       ${{ steps.tracker.outputs.last_reviewed_sha }}
+          DISPOSITION_COMMENT_ID:  ${{ steps.tracker.outputs.disposition_comment_id }}
+        run: python3 scripts/ai_pr_review/step7_5_persist_disposition.py
+
+      - name: Set merge gate status
+        id: status
+        if: >-
+          steps.diff.outputs.skip != 'true' &&
+          steps.diff.outputs.noop != 'true' &&
+          steps.live.outputs.skip != 'true' &&
+          steps.api.outputs.sparse != 'true'
+        env:
+          HEAD_SHA:                ${{ steps.tracker.outputs.head_sha }}
+          TRACKER_ISSUE_NUMBER:    ${{ steps.tracker.outputs.tracker_issue_number }}
+          DISPOSITION_COMMENT_ID:  ${{ steps.tracker.outputs.disposition_comment_id }}
+          DISPOSITION_PARSE_FAILED: ${{ steps.tracker.outputs.disposition_parse_failed }}
+        run: python3 scripts/ai_pr_review/step7_6_set_merge_gate_status.py
+
+      - name: Log token usage
+        if: always() && steps.diff.outputs.skip != 'true' && steps.diff.outputs.noop != 'true' && steps.api.outputs.sparse != 'true'
+        env:
+          INPUT_TOKENS:  ${{ steps.api.outputs.input_tokens }}
+          OUTPUT_TOKENS: ${{ steps.api.outputs.output_tokens }}
+          TOTAL_TOKENS:  ${{ steps.api.outputs.total_tokens }}
+          CACHE_READ:    ${{ steps.api.outputs.cache_read_input_tokens }}
+        run: bash scripts/ai_pr_review/step8_log_tokens.sh
+
+      # Do NOT tack on `|| true`: this dir can hold full PR review state; on a
+      # shared runner a failed rm must surface loudly, not be swallowed.
+      - name: Cleanup
+        if: always()
+        run: bash scripts/ai_pr_review/step9_cleanup.sh
