@@ -94,7 +94,7 @@ jobs:
       # `gh pr diff --repo`, so a fork PR cannot alter the scripts on this runner.
       # Inlined caller has no job_workflow_sha for the toolkit; track its main.
       - name: Checkout review scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: nations-original/ai-pr-review-workflow
           ref: main
